@@ -19,7 +19,7 @@ uint8_t sSk[PQCLEAN_FALCON512_CLEAN_CRYPTO_SECRETKEYBYTES];
 uint8_t client_sPK[PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES];
 static size_t clientSPK_offset = 0;
 
-const uint8_t message[] = "Hello PQClean Falcon512!";
+// const uint8_t message[] = "Hello PQClean Falcon512!";
 uint8_t signature_c[PQCLEAN_FALCON512_CLEAN_CRYPTO_BYTES];
 uint8_t signature_s[PQCLEAN_FALCON512_CLEAN_CRYPTO_BYTES];
 uint8_t signature_to_send_buf[PQCLEAN_FALCON512_CLEAN_CRYPTO_BYTES+2];
@@ -541,7 +541,6 @@ void loop() {
   {
     Serial.println("Device Connected.");
     if (!handshakePerformed){
-
       const uint32_t stackSizeWords = 16384;
       BaseType_t taskCreated = xTaskCreate(
         mlkem_task,
@@ -554,23 +553,7 @@ void loop() {
       if (xSemaphoreTake(doneSemaphoreKEM, portMAX_DELAY) == pdTRUE) {
         Serial.println("End");
         Serial.println("Key exchange done! Safe to use shared ss now.");
-        // Use pk, sk safely here or call a function that uses them
       }
-      // PQCLEAN_MLKEM512_CLEAN_crypto_kem_keypair(pk, sk);
-      // Serial.println("Keypair generated");
-
-      // clientIndicateCharacteristics.setValue(pk, KYBER_PUBLICKEYBYTES);
-      // clientIndicateCharacteristics.indicate();
-
-      // PQCLEAN_MLKEM512_CLEAN_crypto_kem_enc(ct, ss, pk);
-      // Serial.println("Obtained ciphertext from the other side.");
-
-      // PQCLEAN_MLKEM512_CLEAN_crypto_kem_dec(ss, ct, sk);
-      // Serial.println("Decapsulation done");
-
-      // Serial.println("Key Exchange done!");
-      // handshakePerformed = true;
-      // delay(10000);
     }
     delay(1000);
     Serial.println("Encryption Established!!");
