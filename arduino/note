@@ -1,0 +1,14 @@
+BLE Server Client Communication
+===============================
+Kyber Exchange
+---------------
+Server, Client -> generate pub and priv key for signature
+Server, Client -> preconfigured with server sign pub key, client sign pub key
+Server --> generate pub kyber key, priv kyber key
+Server --> INDICATE pub kyber key to client ALONG WITH SIGNATURE
+client --> use enc(pub kyber key) to generate shared secret  and ciphertext
+client --> WRITE ciphertext on server ALONG WITH SIGNATURE
+server --> use dec(priv kyber key, ciphertext) to get shared secret
+
+now then the shared secret is used for every communication use aes
+

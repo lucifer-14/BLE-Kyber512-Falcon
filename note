@@ -1,0 +1,10 @@
+let's say a and b. 
+Aspub = A public key for sign, 
+Aspk = A private key for sign. 
+Apub = A pub kyber, 
+Apk = A private kyber. 
+so i sign my Apub with Aspk and the result signature is sent to b along with my Apub. 
+and B verify the signature using Aspub and Apub. right?
+
+
+Aspub can be shared using PKI or just trsut on first use, pre-shared securely.

@@ -1,0 +1,11 @@
+1192853   -- with key gen too
+1168629   -- with sign without key gen for sign
+1118366   -- just kyber
+353482, 352902   -- just sign on Arduino
+292414, 1310720 -- just a program with nth expect 10 printlines
+
+
+client
+
+1135541     -- only kyber
+1193933     -- with sign
