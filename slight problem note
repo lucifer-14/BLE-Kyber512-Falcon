@@ -1,0 +1,4 @@
+
+There is a slight problem because the pub sign key overwrite is protected, 
+if the server or client generate a new key pair for themselves, they can't update it back to other. 
+in that case, the other's saved pub key has to be deleted manually.
