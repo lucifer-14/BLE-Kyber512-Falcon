@@ -2,3 +2,8 @@
 There is a slight problem because the pub sign key overwrite is protected, 
 if the server or client generate a new key pair for themselves, they can't update it back to other. 
 in that case, the other's saved pub key has to be deleted manually.
+
+
+
+Another problem, when sig error is obtained, re handshake signal need to be sent. from client or server.
+alt solution:set handshake timer to like 20 sec. if handshake is not done in 20 sec. re do from start.
