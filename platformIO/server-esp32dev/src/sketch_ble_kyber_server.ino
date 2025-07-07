@@ -8,6 +8,7 @@
 #include <Preferences.h>
 
 #include "freertos/semphr.h"
+#include "mbedtls/gcm.h"
 
 #include <pqcrypto.h>
 
@@ -27,6 +28,12 @@ uint8_t signature_to_receive_buf[PQCLEAN_FALCON512_CLEAN_CRYPTO_BYTES+2];
 static size_t sig_offset = 0;
 size_t sig_len_s;
 size_t sig_len_c;
+
+
+uint8_t gcm_key[32];
+static size_t data_offset = 0;
+
+
 
 //
 // #define STACK_SIZE (8 * 1024)
@@ -56,6 +63,7 @@ SemaphoreHandle_t doneSemaphoreSigGen;
 #define EXCHANGE_SERVICE_UUID "2be35291-37fc-4772-9dc0-7a3636205ded"
 #define FALCON_SERVICE_UUID "73a8ff7f-2638-4845-8d97-0909b4bcd151"
 #define FALCON_SIG_SERVICE_UUID "2c7d41f1-05cf-4686-9371-55b13aefe341"
+#define DATA_EXCHANGE_SERVICE_UUID "9df2eb52-9b45-4a6a-af86-4ca47bac1ead"
 
 BLECharacteristic clientIndicateCharacteristics("65a50320-e6fb-45f7-9a6b-806e0baddc64", BLECharacteristic::PROPERTY_INDICATE);
 BLEDescriptor clientIndicateDescriptor(BLEUUID((uint16_t)0x2902));
@@ -78,10 +86,31 @@ BLEDescriptor clientFalconSigIndicateDescriptor(BLEUUID((uint16_t)0x2902));
 BLECharacteristic serverFalconSigWriteCharacteristics("130ee706-0b27-4a49-9cc4-f10ffc368360", BLECharacteristic::PROPERTY_WRITE);
 BLEDescriptor serverFalconSigWriteDescriptor(BLEUUID((uint16_t)0x2901));
 
+BLECharacteristic clientDataIndicateCharacteristics("75e48616-472b-4bd8-9507-0a83f1166ece", BLECharacteristic::PROPERTY_INDICATE);
+BLEDescriptor clientDataIndicateDescriptor(BLEUUID((uint16_t)0x2902));
+
+BLECharacteristic serverDataWriteCharacteristics("76c2cc6c-ad4f-4eb1-9691-2b2ed024cb86", BLECharacteristic::PROPERTY_WRITE);
+BLEDescriptor serverDataWriteDescriptor(BLEUUID((uint16_t)0x2901));
+
+
+void hex_print(const char* label, const uint8_t* data, size_t len){
+  Serial.print(label);
+  Serial.print(": ");
+  for (size_t i = 0; i < len; i++) {
+    if (data[i] < 0x10) Serial.print('0');
+    Serial.print(data[i], HEX);
+    Serial.print(' ');
+  }
+  Serial.println();
+}
+
+void gcm_enc(uint8_t* plaintext ){
+
+}
 
 void sig_gen_task(void *pvParameters){
-  PQCLEAN_FALCON512_CLEAN_crypto_sign_signature(signature_s, &sig_len_s, pk, sizeof(pk)-1, sSk);
-  uint16_t len_to_send = (uint16_t)sig_len_s;
+  PQCLEAN_FALCON512_CLEAN_crypto_sign_signature(signature_s, &sig_len_s, pk, sizeof(pk), sSk);
+  // uint16_t len_to_send = (uint16_t)sig_len_s;
   
   signature_to_send_buf[0] = (sig_len_s >> 8) & 0xFF;  // high byte of length
   signature_to_send_buf[1] = sig_len_s & 0xFF;
@@ -190,41 +219,47 @@ void mlkem_task(void *pvParameters) {
     Serial.println("CT SIG Delayed 100 ms");
     delay(100);
   }
-  bool sig_check = PQCLEAN_FALCON512_CLEAN_crypto_sign_verify(signature_c, sig_len_c, ct, sizeof(ct)-1, client_sPK);
+  bool sig_check = PQCLEAN_FALCON512_CLEAN_crypto_sign_verify(signature_c, sig_len_c, ct, sizeof(ct), client_sPK);
   Serial.print("[");
   Serial.print(millis());
   Serial.print(" ms] ");
   if (sig_check == 0){
     Serial.println("Correct Signature. Proceeding....");
+    PQCLEAN_MLKEM512_CLEAN_crypto_kem_dec(ss, ct, sk);
+    Serial.print("[");
+    Serial.print(millis());
+    Serial.print(" ms] ");
+    Serial.println("Decap done");
+
+    Serial.print("\nGenerated SS: ");
+    for (int i = 0; i < KYBER_SSBYTES; i++) {
+      Serial.print(ss[i]);
+      Serial.print(" ");
+    }
+    Serial.print("[");
+    Serial.print(millis());
+    Serial.print(" ms] ");
+    Serial.println("\nDONE.");
+
+    // bool match = true;
+    // for (int i = 0; i < KYBER_SSBYTES; i++) {
+    //   if (ss1[i] != ss2[i]) { match = false; break; }
+    // }
+    // Serial.print("Shared secret match: ");
+    // Serial.println(match ? "YES" : "NO");
+    
+    Serial.println("Key Exchange done!");
+    handshakePerformed = true;
   } else{
     Serial.println("INCorrect Signature. Somehow stop.");
+    memset(signature_c, 0, sizeof(signature_c));    // didn't reset pk and sk cuz they
+    memset(ct, 0, sizeof(ct));    // will be resetted anyway when the key is regenerated
+    Serial.println("Resetted ct and signature_c.");  
+    handshakePerformed = false;
+    readySignal = false;
   }
 
-  PQCLEAN_MLKEM512_CLEAN_crypto_kem_dec(ss, ct, sk);
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-  Serial.println("Decap done");
-
-  Serial.print("\nGenerated SS: ");
-  for (int i = 0; i < KYBER_SSBYTES; i++) {
-    Serial.print(ss[i]);
-    Serial.print(" ");
-  }
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-  Serial.println("\nDONE.");
-
-  // bool match = true;
-  // for (int i = 0; i < KYBER_SSBYTES; i++) {
-  //   if (ss1[i] != ss2[i]) { match = false; break; }
-  // }
-  // Serial.print("Shared secret match: ");
-  // Serial.println(match ? "YES" : "NO");
   
-  Serial.println("Key Exchange done!");
-  handshakePerformed = true;
   xSemaphoreGive(doneSemaphoreKEM);
   vTaskDelete(NULL);
 }
@@ -346,6 +381,53 @@ class serverFalconSigWriteCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+class serverDataWriteCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    // this is easy callback, cannot handle messages longer than 400 bytes
+    uint8_t* data = pCharacteristic->getData();
+    size_t length = pCharacteristic->getLength();
+
+    uint8_t zero_gcm[32] = {0};
+    bool is_gcm_empty = !memcmp(gcm_key, zero_gcm, 32);
+
+    while (is_gcm_empty){
+      Serial.println("GCM Key or SS Delayed 100 ms");
+      delay(100);
+      is_gcm_empty = !memcmp(gcm_key, zero_gcm, 32);
+    }
+    
+    uint8_t data_to_receive[length];
+    memcpy(data_to_receive, data, length);
+
+    uint8_t iv[12];
+    size_t ciphertext_len = length - (12 + 16);
+    uint8_t ciphertext[ciphertext_len];
+    uint8_t tag[16];
+    memcpy(iv, data_to_receive, sizeof(iv));
+    memcpy(tag, data_to_receive+sizeof(iv), sizeof(tag));
+    memcpy(ciphertext, data_to_receive+sizeof(iv)+sizeof(tag), ciphertext_len);
+
+    uint8_t decryptedtext[ciphertext_len];
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, gcm_key, 256);
+    int ret = mbedtls_gcm_auth_decrypt(&gcm, ciphertext_len,
+                                     iv, sizeof(iv),
+                                     NULL, 0,  // No AAD
+                                     tag, sizeof(tag),
+                                     ciphertext, decryptedtext);
+
+    if (ret == 0){
+      hex_print("Decrypted: ", decryptedtext, sizeof(decryptedtext));
+      Serial.print("Decrypted text: ");
+      Serial.println((char*)decryptedtext);
+    } else {
+      Serial.println("Decryption failed! Tag mismatch.");
+    }
+    mbedtls_gcm_free(&gcm);
+  } 
+};
+
 class readyWriteCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic){
     readySignal = true;
@@ -366,24 +448,6 @@ void generateFalconKeys(void *pvParameters){
   wasFalconGenerated = true;
   xSemaphoreGive(doneSemaphoreFalcon);
   vTaskDelete(NULL);
-}
-
-void test(void *pvParameters){
-  Serial.println("Testing falcon");
-
-  // PQCLEAN_FALCON512_CLEAN_crypto_sign_signature(signature, &sig_len, message, sizeof(message)-1, sSk);
-  bool ok;
-  // PQCLEAN_FALCON512_CLEAN_crypto_sign_verify(signature, sig_len, message, sizeof(message)-1, sPk);
-
-  if (ok == 0) {
-    Serial.println("Verified");
-  }else{
-    Serial.println("Not");
-  }
-
-  vTaskDelete(NULL);
-
-
 }
 
 void loadFalconKeys(){
@@ -407,15 +471,6 @@ void loadFalconKeys(){
 
   Serial.println("Loaded");
 
-  // const uint32_t stackSizeWords = 65536;
-  //   BaseType_t taskCreated = xTaskCreate(
-  //     test,
-  //     "test",
-  //     stackSizeWords,
-  //     NULL,
-  //     1,
-  //     NULL
-  //   );
 }
 
 bool falconKeysExist(){
@@ -513,23 +568,35 @@ void setup() {
   BLEService *falconSigService = pServer->createService(FALCON_SIG_SERVICE_UUID);
 
   falconSigService->addCharacteristic(&clientFalconSigIndicateCharacteristics);
-  clientFalconSigIndicateDescriptor.setValue("Send Sign Pub Key Data to Client");
+  clientFalconSigIndicateDescriptor.setValue("Send Signature to Client");
   clientFalconSigIndicateCharacteristics.addDescriptor(&clientFalconSigIndicateDescriptor);
 
   falconSigService->addCharacteristic(&serverFalconSigWriteCharacteristics);
-  serverFalconSigWriteDescriptor.setValue("Receive Sign Pub Key back from Client");
+  serverFalconSigWriteDescriptor.setValue("Receive Signature back from Client");
   serverFalconSigWriteCharacteristics.addDescriptor(&serverFalconSigWriteDescriptor);
   serverFalconSigWriteCharacteristics.setCallbacks(new serverFalconSigWriteCallbacks());
+
+  BLEService *dataExchangeService = pServer->createService(DATA_EXCHANGE_SERVICE_UUID);
+
+  dataExchangeService->addCharacteristic(&clientDataIndicateCharacteristics);
+  clientDataIndicateDescriptor.setValue("Send Data to Client");
+  clientDataIndicateCharacteristics.addDescriptor(&clientDataIndicateDescriptor);
+
+  dataExchangeService->addCharacteristic(&serverDataWriteCharacteristics);
+  serverDataWriteDescriptor.setValue("Receive Data back from Client");
+  serverDataWriteCharacteristics.addDescriptor(&serverDataWriteDescriptor);
+  serverDataWriteCharacteristics.setCallbacks(new serverDataWriteCallbacks());
   
-  // esp_ble_gatt_set_local_mtu(97);
   handshakeService->start();
   falconService->start();
   falconSigService->start();
+  dataExchangeService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(EXCHANGE_SERVICE_UUID);
   pAdvertising->addServiceUUID(FALCON_SERVICE_UUID);
   pAdvertising->addServiceUUID(FALCON_SIG_SERVICE_UUID);
+  pAdvertising->addServiceUUID(DATA_EXCHANGE_SERVICE_UUID);
   pServer->getAdvertising()->start();
   Serial.println("Waiting a client connection...");
 
@@ -541,6 +608,7 @@ void loop() {
   {
     Serial.println("Device Connected.");
     if (!handshakePerformed){
+      Serial.println("Starting handshake ...");
       const uint32_t stackSizeWords = 16384;
       BaseType_t taskCreated = xTaskCreate(
         mlkem_task,
@@ -554,26 +622,61 @@ void loop() {
         Serial.println("End");
         Serial.println("Key exchange done! Safe to use shared ss now.");
       }
+    } else{
+      delay(1000);
+      Serial.println("Encryption Established!!");
+      Serial.print("My pub key: ");
+      for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
+      // Serial.print(sPk[i]);
+      // Serial.print(" ");
+      }
+      Serial.println("Client pub key: ");
+      for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
+      // Serial.print(client_sPK[i]);
+      // Serial.print(" ");
+      }
+      prefs.begin("falcon", false);
+      
+      // prefs.remove("client_sign_pub");  // Deletes "message"
+      // prefs.remove("my_sign_pub");
+      // prefs.remove("my_sign_secret");
+      prefs.end();
+
+      // start of data exchange here....
+      uint8_t iv[12];
+      randombytes(iv, sizeof(iv));
+      uint8_t plaintext[] = "hello";
+      size_t ciphertext_len = sizeof(plaintext);
+      uint8_t ciphertext[ciphertext_len];
+      uint8_t tag[16];
+      // uint8_t decryptedtext[400];
+      uint8_t data_to_send[ciphertext_len + 12 + 16]; // ciphertext + iv + tag len
+      // uint8_t data_to_receive[428];
+
+      Serial.print("Ciphertext_len (should say 6): ");
+      Serial.print(ciphertext_len);
+      // ciphertext[ciphertext_len];
+      memcpy(gcm_key, ss, sizeof(gcm_key));
+
+      mbedtls_gcm_context gcm;
+      mbedtls_gcm_init(&gcm);
+
+      mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, gcm_key, 256);
+      mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, sizeof(plaintext),
+                            iv, sizeof(iv), NULL, 0,
+                            plaintext, ciphertext, sizeof(tag), tag);
+
+      mbedtls_gcm_free(&gcm);
+      // data_to_send[ciphertext_len + 12 + 16]; // ciphertext + iv + tag len
+      memcpy(data_to_send, iv, sizeof(iv));
+      memcpy(data_to_send+sizeof(iv), tag, sizeof(tag));
+      memcpy(data_to_send+sizeof(iv)+sizeof(tag), ciphertext, ciphertext_len);
+      clientDataIndicateCharacteristics.setValue(data_to_send, sizeof(data_to_send));
+      clientDataIndicateCharacteristics.indicate();
+
+      delay(5000);
     }
-    delay(1000);
-    Serial.println("Encryption Established!!");
-    Serial.print("My pub key: ");
-    for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
-    // Serial.print(sPk[i]);
-    // Serial.print(" ");
-    }
-    Serial.println("Client pub key: ");
-    for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
-    // Serial.print(client_sPK[i]);
-    // Serial.print(" ");
-    }
-    prefs.begin("falcon", false);
     
-    // prefs.remove("client_sign_pub");  // Deletes "message"
-    // prefs.remove("my_sign_pub");
-    // prefs.remove("my_sign_secret");
-    // prefs.end();
-    delay(100000);
 
   }
 

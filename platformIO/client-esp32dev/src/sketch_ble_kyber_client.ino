@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "freertos/semphr.h"
+#include "mbedtls/gcm.h"
 
 #include "pqcrypto.h"
 
@@ -22,6 +23,9 @@ static size_t sig_offset = 0;
 size_t sig_len_s;
 size_t sig_len_c;
 
+uint8_t gcm_key[32];
+static size_t data_offset = 0;
+
 //
 
 #define bleServerName "ESP32_Server2"
@@ -37,6 +41,7 @@ bool fullSigReceived = false;
 static BLEUUID exchangeServiceUUID("2be35291-37fc-4772-9dc0-7a3636205ded");
 static BLEUUID falconServiceUUID("73a8ff7f-2638-4845-8d97-0909b4bcd151");
 static BLEUUID falconSigServiceUUID("2c7d41f1-05cf-4686-9371-55b13aefe341");
+static BLEUUID dataExchangeServiceUUID("9df2eb52-9b45-4a6a-af86-4ca47bac1ead");
 
 static BLEUUID clientIndicateCharacteristicsUUID("65a50320-e6fb-45f7-9a6b-806e0baddc64");
 
@@ -51,6 +56,10 @@ static BLEUUID serverFalconWriteCharacteristicsUUID("8e53157c-79b2-4901-8690-e2e
 static BLEUUID clientFalconSigIndicateCharacteristicsUUID("fcc20e75-c787-4831-8b77-b1681ab5fdf6");
 
 static BLEUUID serverFalconSigWriteCharacteristicsUUID("130ee706-0b27-4a49-9cc4-f10ffc368360");
+
+static BLEUUID clientDataIndicateCharacteristicsUUID("75e48616-472b-4bd8-9507-0a83f1166ece");
+
+static BLEUUID serverDataWriteCharacteristicsUUID("76c2cc6c-ad4f-4eb1-9691-2b2ed024cb86");
 
 static bool doConnect = false;
 
@@ -73,16 +82,32 @@ BLERemoteCharacteristic* pRemoteClientFalconIndicateChar = nullptr;
 BLERemoteCharacteristic* pRemoteServerFalconWriteChar = nullptr;
 BLERemoteCharacteristic* pRemoteClientFalconSigIndicateChar = nullptr;
 BLERemoteCharacteristic* pRemoteServerFalconSigWriteChar = nullptr;
+BLERemoteCharacteristic* pRemoteClientDataIndicateChar = nullptr;
+BLERemoteCharacteristic* pRemoteServerDataWriteChar = nullptr;
 
 static uint8_t indicationOn[] = {0x02, 0x00};
 
+void hex_print(const char* label, const uint8_t* data, size_t len){
+  Serial.print(label);
+  Serial.print(": ");
+  for (size_t i = 0; i < len; i++) {
+    if (data[i] < 0x10) Serial.print('0');
+    Serial.print(data[i], HEX);
+    Serial.print(' ');
+  }
+  Serial.println();
+}
+
 void sig_gen_task(void *pvParameters){
-  PQCLEAN_FALCON512_CLEAN_crypto_sign_signature(signature_c, &sig_len_c, ct, sizeof(ct)-1, sSk);
-  uint16_t len_to_send = (uint16_t)sig_len_c;
+  Serial.println("Generting sig for ct ...");
+  PQCLEAN_FALCON512_CLEAN_crypto_sign_signature(signature_c, &sig_len_c, ct, sizeof(ct), sSk);
+  // uint16_t len_to_send = (uint16_t)sig_len_c;
   
   signature_to_send_buf[0] = (sig_len_c >> 8) & 0xFF;  // high byte of length
   signature_to_send_buf[1] = sig_len_c & 0xFF;
   memcpy(signature_to_send_buf + 2, signature_c, PQCLEAN_FALCON512_CLEAN_CRYPTO_BYTES);
+
+  Serial.println("Generting sig for ct done ...");
 
   xSemaphoreGive(doneSemaphoreSigGen);
   vTaskDelete(NULL);
@@ -126,84 +151,92 @@ void mlkem_task(void *pvParameters) {
     Serial.println("PK SIG Delayed 100 ms");
     delay(100);
   }
-  bool sig_check = PQCLEAN_FALCON512_CLEAN_crypto_sign_verify(signature_s, sig_len_s, pk, sizeof(pk)-1, server_sPK);
+  bool sig_check = PQCLEAN_FALCON512_CLEAN_crypto_sign_verify(signature_s, sig_len_s, pk, sizeof(pk), server_sPK);
   Serial.print("[");
   Serial.print(millis());
   Serial.print(" ms] ");
   if (sig_check == 0){
     Serial.println("Correct Signature. Proceeding....");
+
+    PQCLEAN_MLKEM512_CLEAN_crypto_kem_enc(ct, ss, pk);
+    static uint8_t tmp_ct1[384];
+    static uint8_t tmp_ct2[384];
+    memcpy(tmp_ct1, ct, 384);
+    memcpy(tmp_ct2, ct + 384, 384);
+    Serial.print("\nGenerated CT: ");
+    for (int i = 0; i < KYBER_CIPHERTEXTBYTES; i++) {
+      // Serial.print(ct[i]);
+      // Serial.print(" ");
+    }
+    Serial.print("[");
+    Serial.print(millis());
+    Serial.print(" ms] ");
+    Serial.println("Encap done");
+
+    pRemoteServerWriteChar->writeValue(tmp_ct1, 384, true);
+    pRemoteServerWriteChar->writeValue(tmp_ct2, 384, true);
+
+    Serial.println("Sent tmpct.");
+
+    const uint32_t stackSizeWords = 65536;
+    BaseType_t taskCreated = xTaskCreate(
+      sig_gen_task,
+      "SignatureGenerate_Task",
+      stackSizeWords,
+      NULL,
+      1,
+      NULL
+    );
+    if (xSemaphoreTake(doneSemaphoreSigGen, portMAX_DELAY) == pdTRUE) {
+      Serial.println("End");
+      Serial.print("[");
+      Serial.print(millis());
+      Serial.print(" ms] ");
+      Serial.println("Sig gen done! Time to send sig.");
+      // Use pk, sk safely here or call a function that uses them
+    }
+
+    static uint8_t tmp_sig1[377];
+    static uint8_t tmp_sig2[377];
+    memcpy(tmp_sig1, signature_to_send_buf, 377);
+    memcpy(tmp_sig2, signature_to_send_buf + 377, 377);
+
+    pRemoteServerFalconSigWriteChar->writeValue(tmp_sig1, 377, true);
+    pRemoteServerFalconSigWriteChar->writeValue(tmp_sig2, 377, true);
+
+    Serial.print("\nGenerated SS: ");
+    for (int i = 0; i < KYBER_SSBYTES; i++) {
+      Serial.print(ss[i]);
+      Serial.print(" ");
+    }
+    Serial.print("[");
+    Serial.print(millis());
+    Serial.print(" ms] ");
+    Serial.println("\nDONE.");
+
+    // bool match = true;
+    // for (int i = 0; i < KYBER_SSBYTES; i++) {
+    //   if (ss1[i] != ss2[i]) { match = false; break; }
+    // }
+    // Serial.print("Shared secret match: ");
+    // Serial.println(match ? "YES" : "NO");
+
+    Serial.print("[");
+    Serial.print(millis());
+    Serial.print(" ms] ");
+    Serial.println("Key Exchange done!");
+    handshakePerformed = true;
   } else{
     Serial.println("INCorrect Signature. Somehow stop.");
+    memset(signature_s, 0, sizeof(signature_s));
+    memset(pk, 0, sizeof(pk));
+    Serial.println("Resetted pk and signature_s.");
+    handshakePerformed == false;
   }
 
   // check signature with server pub. only after that use enc and send cipher text.
   
-  PQCLEAN_MLKEM512_CLEAN_crypto_kem_enc(ct, ss, pk);
-  static uint8_t tmp_ct1[384];
-  static uint8_t tmp_ct2[384];
-  memcpy(tmp_ct1, ct, 384);
-  memcpy(tmp_ct2, ct + 384, 384);
-  Serial.print("\nGenerated CT: ");
-  for (int i = 0; i < KYBER_CIPHERTEXTBYTES; i++) {
-    // Serial.print(ct[i]);
-    // Serial.print(" ");
-  }
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-  Serial.println("Encap done");
-
-  pRemoteServerWriteChar->writeValue(tmp_ct1, 384, true);
-  pRemoteServerWriteChar->writeValue(tmp_ct2, 384, true);
-
-  const uint32_t stackSizeWords = 65536;
-  BaseType_t taskCreated = xTaskCreate(
-    sig_gen_task,
-    "SignatureGenerate_Task",
-    stackSizeWords,
-    NULL,
-    1,
-    NULL
-  );
-  if (xSemaphoreTake(doneSemaphoreSigGen, portMAX_DELAY) == pdTRUE) {
-    Serial.println("End");
-    Serial.print("[");
-    Serial.print(millis());
-    Serial.print(" ms] ");
-    Serial.println("Sig gen done! Time to send sig.");
-    // Use pk, sk safely here or call a function that uses them
-  }
-
-  static uint8_t tmp_sig1[377];
-  static uint8_t tmp_sig2[377];
-  memcpy(tmp_sig1, signature_to_send_buf, 377);
-  memcpy(tmp_sig2, signature_to_send_buf + 377, 377);
-
-  pRemoteServerFalconSigWriteChar->writeValue(tmp_sig1, 377, true);
-  pRemoteServerFalconSigWriteChar->writeValue(tmp_sig2, 377, true);
-
-  Serial.print("\nGenerated SS: ");
-  for (int i = 0; i < KYBER_SSBYTES; i++) {
-    Serial.print(ss[i]);
-    Serial.print(" ");
-  }
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-  Serial.println("\nDONE.");
-
-  // bool match = true;
-  // for (int i = 0; i < KYBER_SSBYTES; i++) {
-  //   if (ss1[i] != ss2[i]) { match = false; break; }
-  // }
-  // Serial.print("Shared secret match: ");
-  // Serial.println(match ? "YES" : "NO");
-
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-  Serial.println("Key Exchange done!");
-  handshakePerformed = true;
+  
 
   xSemaphoreGive(doneSemaphoreKEM);
   vTaskDelete(NULL);
@@ -240,6 +273,13 @@ bool connectToServer(BLEAddress pAddress) {
     Serial.println(falconSigServiceUUID.toString().c_str());
     return (false);
   }
+
+  BLERemoteService* pRemoteDataExchangeService = pClient->getService(dataExchangeServiceUUID);
+  if (pRemoteDataExchangeService == nullptr) {
+    Serial.print("Failed to find our falcon service UUID: ");
+    Serial.println(dataExchangeServiceUUID.toString().c_str());
+    return (false);
+  }
  
   // Obtain a reference to the characteristics in the service of the remote BLE server.
   pRemoteClientIndicateChar = pRemoteService->getCharacteristic(clientIndicateCharacteristicsUUID);
@@ -249,10 +289,13 @@ bool connectToServer(BLEAddress pAddress) {
   pRemoteServerFalconWriteChar = pRemoteFalconService->getCharacteristic(serverFalconWriteCharacteristicsUUID);
   pRemoteClientFalconSigIndicateChar = pRemoteFalconSigService->getCharacteristic(clientFalconSigIndicateCharacteristicsUUID);
   pRemoteServerFalconSigWriteChar = pRemoteFalconSigService->getCharacteristic(serverFalconSigWriteCharacteristicsUUID);
+  pRemoteClientDataIndicateChar = pRemoteDataExchangeService->getCharacteristic(clientDataIndicateCharacteristicsUUID);
+  pRemoteServerDataWriteChar = pRemoteDataExchangeService->getCharacteristic(serverDataWriteCharacteristicsUUID);
 
   if (pRemoteClientIndicateChar == nullptr || pRemoteServerWriteChar == nullptr || pRemoteReadyWriteChar == nullptr
   || pRemoteServerFalconWriteChar == nullptr || pRemoteClientFalconIndicateChar == nullptr
-  || pRemoteServerFalconSigWriteChar == nullptr || pRemoteClientFalconSigIndicateChar == nullptr) {
+  || pRemoteServerFalconSigWriteChar == nullptr || pRemoteClientFalconSigIndicateChar == nullptr
+  || pRemoteServerDataWriteChar == nullptr || pRemoteClientDataIndicateChar == nullptr) {
     Serial.print("Failed to find our characteristic UUID");
     return false;
   }
@@ -267,6 +310,9 @@ bool connectToServer(BLEAddress pAddress) {
   Serial.println("hmm ...");
   pRemoteClientFalconSigIndicateChar->registerForNotify(clientFalconSigIndicateCallback, true);
   pRemoteClientFalconSigIndicateChar->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)indicationOn, 2, true);
+   Serial.println("hmm4 ...");
+  pRemoteClientDataIndicateChar->registerForNotify(clientDataIndicateCallback, true);
+  pRemoteClientDataIndicateChar->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)indicationOn, 2, true);
   return true;
 }
 
@@ -375,6 +421,49 @@ static void clientFalconSigIndicateCallback(BLERemoteCharacteristic* pBLERemoteC
   Serial.println("Got Sig from server.");
 }
 
+static void clientDataIndicateCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic,
+                                          uint8_t* pData, size_t length, bool isNotify){
+    
+    uint8_t data_to_receive[length];
+    memcpy(data_to_receive, pData, length);
+
+    uint8_t zero_gcm[32] = {0};
+    bool is_gcm_empty = !memcmp(gcm_key, zero_gcm, 32);
+
+    while (is_gcm_empty){
+      Serial.println("GCM Key or SS Delayed 100 ms");
+      delay(100);
+      is_gcm_empty = !memcmp(gcm_key, zero_gcm, 32);
+    } // normally no gcm delay due to it generating ss first than server.
+
+    uint8_t iv[12];
+    size_t ciphertext_len = length - (12 + 16);
+    uint8_t ciphertext[ciphertext_len];
+    uint8_t tag[16];
+    memcpy(iv, data_to_receive, sizeof(iv));
+    memcpy(tag, data_to_receive+sizeof(iv), sizeof(tag));
+    memcpy(ciphertext, data_to_receive+sizeof(iv)+sizeof(tag), ciphertext_len);
+
+    uint8_t decryptedtext[ciphertext_len];
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, gcm_key, 256);
+    int ret = mbedtls_gcm_auth_decrypt(&gcm, ciphertext_len,
+                                     iv, sizeof(iv),
+                                     NULL, 0,  // No AAD
+                                     tag, sizeof(tag),
+                                     ciphertext, decryptedtext);
+
+    if (ret == 0){
+      hex_print("Decrypted: ", decryptedtext, sizeof(decryptedtext));
+      Serial.print("Decrypted text: ");
+      Serial.println((char*)decryptedtext);
+    } else {
+      Serial.println("Decryption failed! Tag mismatch.");
+    }
+    mbedtls_gcm_free(&gcm);
+}
+
 void generateFalconKeys(void *pvParameters){
   
   prefs.begin("falcon", false);  // read-write
@@ -411,16 +500,6 @@ void loadFalconKeys(){
   prefs.end();
 
   Serial.println("Loaded");
-
-  // const uint32_t stackSizeWords = 65536;
-  //   BaseType_t taskCreated = xTaskCreate(
-  //     test,
-  //     "test",
-  //     stackSizeWords,
-  //     NULL,
-  //     1,
-  //     NULL
-  //   );
 }
 
 bool falconKeysExist(){
@@ -505,6 +584,7 @@ void loop() {
     } 
   } else {
     if(!handshakePerformed){
+      Serial.println("Starting handshake ...");
       uint8_t readySignal = {1};
       pRemoteReadyWriteChar->writeValue(readySignal, 1);
       
@@ -536,24 +616,59 @@ void loop() {
 
       // Serial.println("Key Exchange done!");
       // handshakePerformed = true;
+    } else {
+      Serial.println("Encryption Established!!");
+      Serial.print("My pub key: ");
+      for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
+      // Serial.print(sPk[i]);
+      // Serial.print(" ");
+      }
+      Serial.println("server pub key: ");
+      for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
+      // Serial.print(server_sPK[i]);
+      // Serial.print(" ");
+      }
+
+      prefs.begin("falcon", false);
+      // prefs.remove("server_sign_pub");  // Deletes "message"
+      // prefs.remove("my_sign_pub");
+      // prefs.remove("my_sign_secret");
+      prefs.end();
+
+      // start of data exchange here....
+      uint8_t iv[12];
+      randombytes(iv, sizeof(iv));
+      uint8_t plaintext[] = "hi from client";
+      size_t ciphertext_len = sizeof(plaintext);
+      uint8_t ciphertext[ciphertext_len];
+      uint8_t tag[16];
+      // uint8_t decryptedtext[400];
+      uint8_t data_to_send[ciphertext_len + 12 + 16]; // ciphertext + iv + tag len
+      // uint8_t data_to_receive[428];
+
+      Serial.print("Ciphertext_len (should say 15): ");
+      Serial.print(ciphertext_len);
+      // ciphertext[ciphertext_len];
+      memcpy(gcm_key, ss, sizeof(gcm_key));
+
+      mbedtls_gcm_context gcm;
+      mbedtls_gcm_init(&gcm);
+
+      mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, gcm_key, 256);
+      mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, sizeof(plaintext),
+                            iv, sizeof(iv), NULL, 0,
+                            plaintext, ciphertext, sizeof(tag), tag);
+
+      mbedtls_gcm_free(&gcm);
+      // data_to_send[ciphertext_len + 12 + 16]; // ciphertext + iv + tag len
+      memcpy(data_to_send, iv, sizeof(iv));
+      memcpy(data_to_send+sizeof(iv), tag, sizeof(tag));
+      memcpy(data_to_send+sizeof(iv)+sizeof(tag), ciphertext, ciphertext_len);
+      pRemoteServerDataWriteChar->writeValue(data_to_send, sizeof(data_to_send), true);
+      Serial.println("Data sent.");
+
+      delay(100000);
     }
-    Serial.println("Encryption Established!!");
-    Serial.print("My pub key: ");
-    for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
-    // Serial.print(sPk[i]);
-    // Serial.print(" ");
-    }
-    Serial.println("server pub key: ");
-    for (int i = 0; i < PQCLEAN_FALCON512_CLEAN_CRYPTO_PUBLICKEYBYTES; i++) {
-    // Serial.print(server_sPK[i]);
-    // Serial.print(" ");
-    }
-    // prefs.begin("falcon", false);
-    // prefs.remove("server_sign_pub");  // Deletes "message"
-    // prefs.remove("my_sign_pub");
-    // prefs.remove("my_sign_secret");
-    // prefs.end();
-    delay(100000);
 
   }
   delay(1000); // Delay a second between loops.
