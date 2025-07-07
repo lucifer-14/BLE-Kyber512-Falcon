@@ -7,3 +7,5 @@ in that case, the other's saved pub key has to be deleted manually.
 
 Another problem, when sig error is obtained, re handshake signal need to be sent. from client or server.
 alt solution:set handshake timer to like 20 sec. if handshake is not done in 20 sec. re do from start.
+
+when i remove server's pub sign key on client script. i sometimes get error, where the ct sig is not being generated. idk why.
