@@ -92,7 +92,6 @@ BLEDescriptor clientDataIndicateDescriptor(BLEUUID((uint16_t)0x2902));
 BLECharacteristic serverDataWriteCharacteristics("76c2cc6c-ad4f-4eb1-9691-2b2ed024cb86", BLECharacteristic::PROPERTY_WRITE);
 BLEDescriptor serverDataWriteDescriptor(BLEUUID((uint16_t)0x2901));
 
-
 void hex_print(const char* label, const uint8_t* data, size_t len){
   Serial.print(label);
   Serial.print(": ");
@@ -104,13 +103,8 @@ void hex_print(const char* label, const uint8_t* data, size_t len){
   Serial.println();
 }
 
-void gcm_enc(uint8_t* plaintext ){
-
-}
-
 void sig_gen_task(void *pvParameters){
   PQCLEAN_FALCON512_CLEAN_crypto_sign_signature(signature_s, &sig_len_s, pk, sizeof(pk), sSk);
-  // uint16_t len_to_send = (uint16_t)sig_len_s;
   
   signature_to_send_buf[0] = (sig_len_s >> 8) & 0xFF;  // high byte of length
   signature_to_send_buf[1] = sig_len_s & 0xFF;
@@ -275,10 +269,6 @@ class MyServerCallbacks: public BLEServerCallbacks {
     Serial.print("MTU changed: ");
     Serial.println(param->mtu.mtu);
   }
-};
-
-class MyMTUCallbacks : public BLEServerCallbacks {
-  
 };
 
 class serverWriteCallbacks : public BLECharacteristicCallbacks {
